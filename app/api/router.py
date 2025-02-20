@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routers import health_check, login, private
-from app.core.config import settings
+from app.api.routers import health_check, login, whisper_tasks
 
 api_router = APIRouter()
 
@@ -9,9 +8,6 @@ api_router = APIRouter()
 api_router.include_router(health_check.router, prefix="/health", tags=["Health Check"])
 
 # Whisper Tasks routers
-api_router.include_router(login.router, prefix="/whisper", tags=["Whisper Tasks"])
-
-api_router.include_router(login.router)
-
-if settings.ENVIRONMENT == "local":
-    api_router.include_router(private.router)
+api_router.include_router(
+    whisper_tasks.router, prefix="/whisper", tags=["Whisper Tasks"]
+)
