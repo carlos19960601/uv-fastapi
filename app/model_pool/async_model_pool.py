@@ -1,4 +1,5 @@
 # 异步模型池 | Async model pool
+import asyncio
 import threading
 from asyncio import Queue
 from typing import Optional
@@ -97,9 +98,59 @@ class AsyncModelPool:
         self.min_size = min_size
         self.max_size = self.get_optimal_max_size(max_size)
         self.pool = Queue(maxsize=self.max_size)
+        self.init_with_max_pool_size = init_with_max_pool_size
+        self.loading_lock = asyncio.Lock()
 
-    def initialize_pool(self) -> None:
-        pass
+    async def initialize_pool(self) -> None:
+        """
+        异步初始化模型池，按批次加载模型实例以减少并发冲突。
+
+        Initialize the model pool asynchronously by loading the minimum number of model instances in batches
+        to reduce concurrent download conflicts.
+        """
+        instances_to_create = (
+            self.max_size if self.init_with_max_pool_size else self.min_size
+        )
+        # 每批加载的实例数，用于减少并发冲突 | Number of instances to load per batch to reduce concurrent conflicts
+        batch_size = 1
+
+        self.logger.info(
+            f"""
+        Initializing AsyncModelPool with total {instances_to_create} instances...
+        Engine           : {self.engine}
+        Min pool size    : {self.min_size}
+        Max pool size    : {self.max_size}
+        Max instances/GPU: {self.max_instances_per_gpu}
+        Init with max size: {self.init_with_max_pool_size}
+        This may take some time, please wait...
+        """
+        )
+
+        try:
+            async with self.loading_lock:
+                if self.current_size >= self.min_size:
+                    self.logger.info(
+                        "AsyncModelPool is already initialized. Skipping initialization..."
+                    )
+                    return
+
+                # 分批加载模型实例 | Load model instances in batches
+                for i in range(0, instances_to_create, batch_size):
+                    tasks = [
+                        self._create_and_put_model(i + j)
+                        for j in range(batch_size)
+                        if i + j < instances_to_create
+                    ]
+                    await asyncio.gather(*tasks)
+                    self.logger.info(
+                        f"Batch of {batch_size} model instance(s) created."
+                    )
+
+                self.logger.info(
+                    f"Successfully initialized AsyncModelPool with {instances_to_create} instances."
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to initialize AsyncModelPool: {e}")
 
     def get_optimal_max_size(self, max_size: int) -> int:
         """
@@ -119,3 +170,54 @@ class AsyncModelPool:
         optimal_size = max_size
 
         return optimal_size
+
+    async def get_model(
+        self, timeout: Optional[float] = 5.0, strategy: str = "existing"
+    ):
+        """
+        异步获取模型实例。如果池为空且未达到最大大小，则按指定策略创建新的模型实例。
+
+        Asynchronously retrieve a model instance. If the pool is empty and the maximum pool size
+        has not been reached, a new model instance will be created based on the specified strategy.
+
+        :param timeout: 超时时间（以秒为单位），用于等待从池中获取模型实例。默认为 5 秒。
+                        Timeout in seconds for waiting to retrieve a model instance from the pool.
+                        Defaults to 5 seconds.
+        :param strategy: 获取模型的策略 ("existing", "dynamic")。默认为 "existing"。
+                            Strategy for retrieving a model instance ("existing", "dynamic"). Defaults to "existing".
+
+        :return: 模型实例 | Model instance
+
+        :raises RuntimeError: 当模型池已达到最大大小，且所有实例都正在使用时。
+                                Raises RuntimeError when the model pool is exhausted and all instances are in use.
+        """
+        self.logger.info(
+            f"Attempting to retrieve a model instance from the pool with strategy '{strategy}'..."
+        )
+
+        try:
+            if strategy == "existing":
+                # 尝试从池中获取现有模型实例 | Attempt to retrieve an existing model instance
+                try:
+                    model = await asyncio.wait_for(self.pool.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    self.logger.error(
+                        "All model instances are in use, and the pool is exhausted."
+                    )
+                    raise RuntimeError(
+                        "Model pool exhausted, and all instances are currently in use."
+                    )
+
+            elif strategy == "dynamic":
+                # 在池大小允许的情况下动态创建新模型 | Dynamically create a new model if pool size allows
+                model = await asyncio.wait_for(self.pool.get(), timeout=timeout)
+
+            else:
+                # 默认尝试从池中获取模型实例 | Default: attempt to retrieve from pool
+                model = await asyncio.wait_for(self.pool.get(), timeout=timeout)
+
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve a model instance from the pool: {e}")
+            raise RuntimeError(
+                "Unexpected error occurred while retrieving a model instance."
+            )

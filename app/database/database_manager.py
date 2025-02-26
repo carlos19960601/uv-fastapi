@@ -1,13 +1,12 @@
 import asyncio
 from contextlib import contextmanager
-from typing import Generator, Optional
+from typing import Generator, List, Optional
 
 from sqlalchemy import Engine
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.database.models.task_models import Task, TaskStatus
 from app.utils.logging_utils import configure_logging
-
-from .models import task_models
 
 # 配置日志记录器 | Configure logger
 logger = configure_logging(name=__name__)
@@ -76,3 +75,47 @@ class DatabaseManager:
 
         with Session(self._engine) as session:
             yield session
+
+    def get_queued_tasks(self, max_concurrent_tasks: int) -> List[Task]:
+        """
+        异步获取队列中的任务
+
+        Asynchronously get tasks from the queue.
+
+        :return: 任务信息 | Task details
+        """
+        with self.get_session() as session:
+            try:
+                results = session.exec(
+                    select(Task)
+                    .where(Task.status == TaskStatus.queued)
+                    .limit(max_concurrent_tasks)
+                ).all()
+                return results
+            except Exception as e:
+                logger.error(f"Error fetching queued tasks: {e}")
+                raise
+
+    def update_task(self, task_id: int, **kwargs) -> Optional[dict]:
+        """
+        异步更新任务信息
+
+        Asynchronously update task details.
+
+        :param task_id: 任务ID | Task ID
+        :param kwargs: 需要更新的字段 | Fields to update
+        :return: 更新后的任务信息 | Updated task details
+        """
+        with self.get_session() as session:
+            try:
+                task = session.get(Task, task_id)
+                if not task:
+                    return None
+                for key, value in kwargs.items():
+                    setattr(task, key, value)
+                session.commit()
+                return task.to_dict()
+            except Exception as e:
+                logger.error(f"Error updating task: {e}")
+                session.rollback()
+                return None

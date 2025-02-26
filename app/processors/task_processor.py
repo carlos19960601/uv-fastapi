@@ -1,11 +1,18 @@
 import asyncio
+import datetime
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional
 
 from app.database.database_manager import DatabaseManager
 from app.database.models.task_models import Task, TaskStatus
 from app.model_pool.async_model_pool import AsyncModelPool
 from app.utils.logging_utils import configure_logging
+
+# 初始化静态线程池，所有实例共享 | Initialize static thread pool, shared by all instances
+_executor: ThreadPoolExecutor = ThreadPoolExecutor()
 
 
 class TaskProcessor:
@@ -28,14 +35,18 @@ class TaskProcessor:
         self.database_type = database_type
         # 保存数据库 URL | Save database URL
         self.database_url = database_url
+        # 初始化数据库管理器 | Initialize database manager
+        self.db_manager: Optional[DatabaseManager] = None
         # 初始化查询请求队列 | Initialize query request queue
-        self.fetch_queue: asyncio.Queue = asyncio.Queue()
+        # self.fetch_queue: asyncio.Queue = asyncio.Queue()
         # 初始化任务队列 | Initialize task queue
-        self.update_queue = asyncio.Queue()
+        # self.update_queue = asyncio.Queue()
         # 创建任务处理队列 | Create task processing queue
-        self.task_processing_queue = asyncio.Queue()
+        # self.task_processing_queue = asyncio.Queue()
         # 创建清理队列 | Create cleanup queue
-        self.cleanup_queue = asyncio.Queue()
+        # self.cleanup_queue = asyncio.Queue()
+        # 创建回调队列 | Create callback queue
+        # self.callback_queue = asyncio.Queue()
         self.logger = configure_logging(name=__name__)
         self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self.thread: threading.Thread = threading.Thread(target=self.run_loop)
@@ -69,6 +80,11 @@ class TaskProcessor:
         Runs the asynchronous event loop in the background to process the task queue until a stop signal is triggered.
         """
         asyncio.set_event_loop(self.loop)
+
+        # 初始化查询请求队列 | Initialize query request queue
+        self.fetch_queue: asyncio.Queue = asyncio.Queue()
+        # 创建任务处理队列 | Create task processing queue
+        self.task_processing_queue = asyncio.Queue()
 
         # 在事件循环中初始化数据库管理器
         self.loop.run_until_complete(self.initialize_db_manager())
@@ -159,3 +175,176 @@ class TaskProcessor:
             finally:
                 # 标记查询完成 | Mark the query as completed
                 self.fetch_queue.task_done()
+
+    async def _process_multiple_tasks(self, tasks: List[Task]) -> None:
+        """
+        并行处理给定的多个任务，将每个任务提交到线程池。
+
+        Processes multiple tasks in parallel, submitting each to the thread pool.
+
+        :param tasks: 要处理的任务列表 | List of tasks to process
+        :return: None
+        """
+        loop = asyncio.get_event_loop()
+
+        futures = [
+            loop.run_in_executor(_executor, self._process_task_sync, task)
+            for task in tasks
+        ]
+
+        results = await asyncio.gather(*futures, return_exceptions=True)
+
+    def _process_task_sync(self, task: Task) -> dict:
+        """
+        在线程池中同步处理单个任务，包括音频转录和数据库更新。
+
+        Synchronously processes a single task in the thread pool, including audio transcription and database updates.
+
+        :param task: 要处理的任务实例 | The task instance to process
+        :return: dict: 任务处理结果 | dict: Task processing result
+        """
+        try:
+            self.logger.info(
+                f"""
+                Processing queued task:
+                ID          : {task.id}
+                Engine      : {task.engine_name}
+                Type        : {task.task_type}
+                Priority    : {task.priority}
+                File        : {task.file_name}
+                Size        : {task.file_size_bytes} bytes
+                Duration    : {task.file_duration} seconds
+                Created At  : {task.created_at}
+                Output URL  : {task.output_url}
+                """
+            )
+
+            if not task.file_path and task.file_url:
+                self.logger.info(
+                    "Detected task with file URL, start downloading file from URL..."
+                )
+
+                # 异步下载文件并获取相关信息 | Asynchronously download the file and get relevant information
+                task.file_path = asyncio.run(
+                    self.file_utils.download_file_from_url(task.file_url)
+                )
+
+                # 检查文件路径是否有效 | Check if the file path is valid
+                if not task.file_path:
+                    raise ValueError("Failed to download file: file path is missing")
+
+                # 获取文件时长和大小 | Get file duration and size
+                task.file_duration = asyncio.run(
+                    self.file_utils.get_audio_duration(task.file_path)
+                )
+                task.file_size_bytes = os.path.getsize(task.file_path)
+
+                # 检查下载后的文件属性是否齐全 | Check if the downloaded file attributes are complete
+                if (
+                    not task.file_path
+                    or task.file_size_bytes == 0
+                    or task.file_duration == 0
+                ):
+                    raise ValueError(
+                        "Error: Incomplete file download or invalid file attributes"
+                    )
+
+                # 日志记录 | Log the download
+                self.logger.info(
+                    f"""
+                    Downloaded task file from URL:
+                    ID          : {task.id}
+                    File Path   : {task.file_path}
+                    File Size   : {task.file_size_bytes} bytes
+                    Duration    : {task.file_duration} seconds
+                    URL         : {task.file_url}
+                    """
+                )
+
+            # 获取模型实例 | Acquire a model instance
+            model = asyncio.run(self.model_pool.get_model())
+
+            try:
+                # 记录任务开始时间 | Record task start time
+                task_start_time: datetime.datetime = datetime.datetime.now()
+
+                # 执行转录任务 | Perform transcription task
+                if self.model_pool.engine == "openai_whisper":
+                    transcribe_result = model.transcribe(
+                        task.file_path, **task.decode_options or {}, task=task.task_type
+                    )
+                    segments = transcribe_result["segments"]
+                    language = transcribe_result.get("language")
+                    # OpenAI Whisper不返回info，保持空字典 | OpenAI Whisper does not return info, keep an empty dictionary
+                    info = {}
+                elif self.model_pool.engine == "faster_whisper":
+                    segments, info = model.transcribe(
+                        task.file_path, **task.decode_options or {}, task=task.task_type
+                    )
+                    segments = [self.segments_to_dict(segment) for segment in segments]
+                    language = info.language
+                else:
+                    raise ValueError(
+                        f"Trying to process task with unsupported engine: {self.model_pool.engine}"
+                    )
+
+                # 通用的结果结构 | Common result structure
+                result = {
+                    "text": " ".join([seg["text"] for seg in segments]).strip(),
+                    "segments": segments,
+                    "info": info,
+                }
+
+                # 记录任务结束时间 | Record task end time
+                task_end_time: datetime.datetime = datetime.datetime.now()
+                task_processing_time = (task_end_time - task_start_time).total_seconds()
+
+                self.logger.info(
+                    f"""
+                    Task processed successfully:
+                    ID          : {task.id}
+                    Engine      : {task.engine_name}
+                    Priority    : {task.priority}
+                    Type        : {task.task_type}
+                    File        : {task.file_name}
+                    Size        : {task.file_size_bytes} bytes
+                    Duration    : {task.file_duration} seconds
+                    Created At  : {task.created_at}
+                    Output URL  : {task.output_url}
+                    Language    : {language}
+                    Processing Time: {task_processing_time} seconds
+                    """
+                )
+
+                # 更新任务状态和结果 | Update task status and result
+                task_update = {
+                    "status": TaskStatus.completed,
+                    "file_path": task.file_path,
+                    "file_size_bytes": task.file_size_bytes,
+                    "file_duration": task.file_duration,
+                    "language": language,
+                    "result": result,
+                    "task_processing_time": task_processing_time,
+                }
+                self.update_queue.put_nowait((task.id, task_update))
+
+            finally:
+                # 将模型实例归还到池中 | Return the model instance to the pool
+                asyncio.run(self.model_pool.return_model(model))
+
+        except Exception as e:
+            self.logger.error(
+                f"""
+                Error processing task: 
+                ID          : {task.id}
+                Engine      : {task.engine_name}
+                Priority    : {task.priority}
+                Type        : {task.task_type}
+                File        : {task.file_name}
+                Size        : {task.file_size_bytes} bytes
+                Duration    : {task.file_duration} seconds
+                Created At  : {task.created_at}
+                Output URL  : {task.output_url}
+                Error       : {str(e)}
+                """
+            )
