@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
         faster_whisper_download_root=settings.faster_whisper.faster_whisper_download_root,
     )
     # 初始化模型池，加载模型，这可能需要一些时间 | Initialize the model pool, load the model, this may take some time
-    model_pool.initialize_pool()
+    await model_pool.initialize_pool()
 
     # 实例化 WhisperService | Instantiate WhisperService
     whisper_service = WhisperService(

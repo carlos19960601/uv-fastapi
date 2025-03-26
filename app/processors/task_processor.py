@@ -177,7 +177,6 @@ class TaskProcessor:
             try:
                 # 执行数据库查询
                 tasks = self.db_manager.get_queued_tasks(self.max_concurrent_tasks)
-                self.logger.info(f"Fetched {len(tasks)} tasks from database.")
                 for task in tasks:
                     # 将任务状态更新为处理中 | Update task status to processing
                     self.db_manager.update_task(task.id, status=TaskStatus.processing)
@@ -291,6 +290,7 @@ class TaskProcessor:
                 """
             )
 
+            # 检查任务是否需要从 URL 下载文件 | Check if the task requires downloading the file from a URL
             if not task.file_path and task.file_url:
                 self.logger.info(
                     "Detected task with file URL, start downloading file from URL..."

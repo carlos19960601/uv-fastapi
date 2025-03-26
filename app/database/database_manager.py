@@ -74,15 +74,7 @@ class DatabaseManager:
             self._connect()
 
         with Session(self._engine) as session:
-            try:
-                yield session
-            except OperationalError:
-                logger.error(
-                    f"Operational error in session: {e}. Reconnecting to database."
-                )
-                self._is_connected = False
-                self._connect()
-                yield session
+            yield session
 
     def get_queued_tasks(self, max_concurrent_tasks: int) -> List[Task]:
         """

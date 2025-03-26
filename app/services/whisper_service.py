@@ -150,6 +150,7 @@ class WhisperService:
             )
             session.add(task)
             session.commit()
+            # 如果不访问 task.id 就不会执行Select语句
             task_id = task.id
             # 设置任务输出链接 | Set task output URL
             task.output_url = f"{request.url_for('task_result')}?task_id={task_id}"
