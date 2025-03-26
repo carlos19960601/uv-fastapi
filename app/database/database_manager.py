@@ -74,7 +74,15 @@ class DatabaseManager:
             self._connect()
 
         with Session(self._engine) as session:
-            yield session
+            try:
+                yield session
+            except OperationalError:
+                logger.error(
+                    f"Operational error in session: {e}. Reconnecting to database."
+                )
+                self._is_connected = False
+                self._connect()
+                yield session
 
     def get_queued_tasks(self, max_concurrent_tasks: int) -> List[Task]:
         """
@@ -86,12 +94,13 @@ class DatabaseManager:
         """
         with self.get_session() as session:
             try:
-                results = session.exec(
+                statement = (
                     select(Task)
                     .where(Task.status == TaskStatus.queued)
                     .limit(max_concurrent_tasks)
-                ).all()
-                return results
+                )
+                results = session.exec(statement)
+                return results.all()
             except Exception as e:
                 logger.error(f"Error fetching queued tasks: {e}")
                 raise

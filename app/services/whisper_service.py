@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 from fastapi import UploadFile
@@ -52,6 +53,7 @@ class WhisperService:
         # 初始化任务处理器 | Initialize task processor
         self.task_processor = TaskProcessor(
             model_pool=self.model_pool,
+            file_utils=self.file_utils,
             database_type=self.db_manager.database_type,
             database_url=self.db_manager.database_url,
             max_concurrent_tasks=self.max_concurrent_tasks,
@@ -98,6 +100,7 @@ class WhisperService:
         callback_url: Optional[str],
         decode_options: dict,
         task_type: str,
+        priority: str,
         request: Request,
     ) -> Task:
         """
@@ -116,6 +119,8 @@ class WhisperService:
         :param request: FastAPI 请求对象 | FastAPI request object
         :return: 保存到数据库的任务对象 | Task object saved to the database
         """
+        # 如果file是UploadFile对象或者bytes对象，那么就保存到临时文件夹，然后返回临时文件路径
+        # If file is an UploadFile object or bytes object, save it to the temporary folder and return the temporary file path
         if file_upload:
             temp_file_path = await self.file_utils.save_uploaded_file(
                 file=file_upload, file_name=file_name
@@ -123,6 +128,8 @@ class WhisperService:
             self.logger.debug(
                 f"Saved uploaded file to temporary path: {temp_file_path}"
             )
+            duration = await self.file_utils.get_audio_duration(temp_file_path)
+            file_size_bytes = os.path.getsize(temp_file_path)
         else:
             temp_file_path = None
             duration = None
@@ -131,16 +138,23 @@ class WhisperService:
         with self.db_manager.get_session() as session:
             task = Task(
                 engine_name=self.model_pool.engine,
+                callback_url=callback_url,
                 task_type=task_type,
                 file_path=temp_file_path,
                 file_url=file_url,
                 file_name=file_name,
+                file_size_bytes=file_size_bytes,
+                decode_options=decode_options,
+                file_duration=duration,
+                priority=priority,
             )
-
             session.add(task)
             session.commit()
             task_id = task.id
             # 设置任务输出链接 | Set task output URL
+            task.output_url = f"{request.url_for('task_result')}?task_id={task_id}"
+            session.commit()
+            session.refresh(task)
 
         self.logger.info(f"Created transcription task with ID: {task_id}")
         return task

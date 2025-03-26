@@ -35,6 +35,16 @@ class WhisperTaskRequest(BaseModel):
         }
     )
 
+    language: str = Form(
+        "",
+        description="指定输出语言，例如 'en' 或 'zh'，留空则自动检测 / Specify the output language, e.g., 'en' or 'zh', leave empty for auto-detection",
+    )
+
+    temperature: str = Form(
+        "0.8,1.0",
+        description="采样温度，控制输出文本的多样性，可以是单个值或使用逗号分隔的多个值 / Sampling temperature, control the diversity of the output text, can be a single value or multiple values separated by commas",
+    )
+
     task_type: TaskType = Form(
         TaskType.transcribe,
         description="任务类型，默认为 'transcribe'，具体取值请参考文档 / Task type, default is 'transcribe', refer to the documentation for specific values",
@@ -53,8 +63,4 @@ class WhisperTaskRequest(BaseModel):
 class WhisperTaskFileOption(WhisperTaskRequest):
     file_url: Optional[str] = Form(
         "", description="媒体文件的 URL 地址 / URL address of the media file"
-    )
-    language: str = Form(
-        "",
-        description="指定输出语言，例如 'en' 或 'zh'，留空则自动检测 / Specify the output language, e.g., 'en' or 'zh', leave empty for auto-detection",
     )

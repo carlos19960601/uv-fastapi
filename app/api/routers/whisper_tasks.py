@@ -1,3 +1,4 @@
+from re import A
 from typing import Union
 from urllib.parse import urlparse
 
@@ -5,8 +6,12 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, 
 
 from app.api.models.api_response_model import ErrorResponseModel, ResponseModel
 from app.api.models.whisper_task_request import WhisperTaskFileOption
+from app.utils.logging_utils import configure_logging
 
 router = APIRouter()
+
+
+logger = configure_logging(name=__name__)
 
 
 @router.post(
@@ -146,6 +151,11 @@ async def task_create(
     try:
         decode_options = {
             "language": task_data.language,
+            "temperature": (
+                [float(temp) for temp in task_data.temperature.split(",")]
+                if "," in task_data.temperature
+                else float(task_data.temperature)
+            ),
         }
 
         task_info = await request.app.state.whisper_service.create_whisper_task(
@@ -155,6 +165,7 @@ async def task_create(
             callback_url=task_data.callback_url,
             decode_options=decode_options,
             task_type=task_data.task_type,
+            priority=task_data.priority,
             request=request,
         )
 
@@ -163,6 +174,7 @@ async def task_create(
             params={
                 **decode_options,
                 "task_type": task_data.task_type,
+                "callback_url": task_data.callback_url,
             },
             data=task_info.to_dict(),
         )
@@ -176,5 +188,66 @@ async def task_create(
                 code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 message=f"An unexpected error occurred while creating the transcription task: {str(e)}",
                 params=dict(request.query_params),
+            ).model_dump(),
+        )
+
+
+@router.get(
+    "/tasks/result",
+    response_model=ResponseModel,
+    summary="获取任务结果 / Get task result",
+    response_description="获取任务结果的结果信息 / Result information of getting task result",
+)
+async def task_result(
+    request: Request,
+    task_id: int = Query(..., description="任务ID / Task ID"),
+) -> ResponseModel:
+    """
+    # [中文]
+
+    ### 用途说明:
+    - 获取指定任务的结果信息。
+
+    ### 参数说明:
+    - `task_id` (int): 任务ID。
+
+    ### 返回:
+    - 返回一个包含任务结果信息的响应，包括任务ID、状态、优先级等信息。
+
+    ### 错误代码说明:
+    - `200`: 任务已完成，返回任务结果信息。
+    - `202`: 任务处于排队中，或正在处理中。
+    - `404`: 任务未找到，可能是任务ID不存在。
+    - `500`: 任务处理失败，或发生未知错误。
+    - `503`: 数据库错误。
+
+    # [English]
+
+    ### Purpose:
+    - Get the result information of the specified task.
+
+    ### Parameters:
+    - `task_id` (int): Task ID.
+
+    ### Returns:
+    - Returns a response containing task result information, including task ID, status, priority, etc.
+
+    ### Error Code Description:
+    - `200`: Task is completed, return task result information.
+    - `202`: Task is queued or processing.
+    - `404`: Task not found, possibly because the task ID does not exist.
+    - `500`: Task processing failed or an unknown error occurred.
+    - `503`: Database error.
+    """
+    try:
+        # 通过任务ID查询任务 | Query task by task ID
+        task = await request.app.state.db_manager.get_task_by_id(task_id)
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ErrorResponseModel(
+                code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message=f"An unexpected error occurred while getting the task result: {str(e)}",
             ).model_dump(),
         )

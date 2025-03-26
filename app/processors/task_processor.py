@@ -6,9 +6,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
+from sympy import EX
+
+from app.api.routers.whisper_tasks import task_create
+from app.core.config import settings
 from app.database.database_manager import DatabaseManager
 from app.database.models.task_models import Task, TaskStatus
 from app.model_pool.async_model_pool import AsyncModelPool
+from app.utils.file_utils import FileUtils
 from app.utils.logging_utils import configure_logging
 
 # 初始化静态线程池，所有实例共享 | Initialize static thread pool, shared by all instances
@@ -25,28 +30,21 @@ class TaskProcessor:
     def __init__(
         self,
         model_pool: AsyncModelPool,
+        file_utils: FileUtils,
         database_type: str,
         database_url: str,
         max_concurrent_tasks: int,
         task_status_check_interval: int,
     ) -> None:
         self.model_pool: AsyncModelPool = model_pool
+        self.file_utils: FileUtils = file_utils
         # 保存数据库类型 | Save database type
         self.database_type = database_type
         # 保存数据库 URL | Save database URL
         self.database_url = database_url
         # 初始化数据库管理器 | Initialize database manager
         self.db_manager: Optional[DatabaseManager] = None
-        # 初始化查询请求队列 | Initialize query request queue
-        # self.fetch_queue: asyncio.Queue = asyncio.Queue()
-        # 初始化任务队列 | Initialize task queue
-        # self.update_queue = asyncio.Queue()
-        # 创建任务处理队列 | Create task processing queue
-        # self.task_processing_queue = asyncio.Queue()
-        # 创建清理队列 | Create cleanup queue
-        # self.cleanup_queue = asyncio.Queue()
-        # 创建回调队列 | Create callback queue
-        # self.callback_queue = asyncio.Queue()
+
         self.logger = configure_logging(name=__name__)
         self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self.thread: threading.Thread = threading.Thread(target=self.run_loop)
@@ -85,6 +83,12 @@ class TaskProcessor:
         self.fetch_queue: asyncio.Queue = asyncio.Queue()
         # 创建任务处理队列 | Create task processing queue
         self.task_processing_queue = asyncio.Queue()
+        # 初始化任务队列 | Initialize task queue
+        self.update_queue = asyncio.Queue()
+        # 创建清理队列 | Create cleanup queue
+        self.cleanup_queue = asyncio.Queue()
+        # 创建回调队列 | Create callback queue
+        self.callback_queue = asyncio.Queue()
 
         # 在事件循环中初始化数据库管理器
         self.loop.run_until_complete(self.initialize_db_manager())
@@ -93,13 +97,13 @@ class TaskProcessor:
         self.loop.create_task(self.fetch_task_worker())
 
         # 使用 create_task 启动 process_update_queue 作为持续运行的后台任务 | Start process_update_queue as a continuous background task using create_task
-        # self.loop.create_task(self.update_task_worker())
+        self.loop.create_task(self.update_task_worker())
 
         # 使用 create_task 启动 process_tasks 作为持续运行的后台任务 | Start process_tasks as a continuous background task using create_task
         self.loop.create_task(self.process_tasks_worker())
 
         # 使用 create_task 启动 cleanup_worker 作为持续运行的后台任务 | Start cleanup_worker as a continuous background task using create_task
-        # self.loop.create_task(self.cleanup_worker())
+        self.loop.create_task(self.cleanup_worker())
 
         # 使用 create_task 启动 callback_worker 作为持续运行的后台任务 | Start callback_worker as a continuous background task using create_task
         # self.loop.create_task(self.callback_worker())
@@ -133,6 +137,11 @@ class TaskProcessor:
 
         :return: None
         """
+        # 记录上次日志输出的时间 | Record the time of the last log output
+        last_log_time = 0
+        # 日志输出间隔，单位为秒 | Log output interval in seconds
+        log_delay = 30
+
         while not self.shutdown_event.is_set():
             try:
                 await self.fetch_queue.put("fetch")
@@ -142,6 +151,11 @@ class TaskProcessor:
                     await self._process_multiple_tasks(tasks)
                 else:
                     current_time = time.time()
+                    if current_time - last_log_time >= log_delay:
+                        self.logger.info(
+                            f"No tasks to process, waiting for new tasks..."
+                        )
+                        last_log_time = current_time
                     await asyncio.sleep(self.task_status_check_interval)
 
             except Exception as e:
@@ -163,11 +177,10 @@ class TaskProcessor:
             try:
                 # 执行数据库查询
                 tasks = self.db_manager.get_queued_tasks(self.max_concurrent_tasks)
+                self.logger.info(f"Fetched {len(tasks)} tasks from database.")
                 for task in tasks:
                     # 将任务状态更新为处理中 | Update task status to processing
-                    await self.db_manager.update_task(
-                        task.id, status=TaskStatus.processing
-                    )
+                    self.db_manager.update_task(task.id, status=TaskStatus.processing)
                     # 将结果放入 task_result_queue 中 | Put the result into task_result_queue
                 await self.task_processing_queue.put(tasks)
             except Exception as e:
@@ -175,6 +188,37 @@ class TaskProcessor:
             finally:
                 # 标记查询完成 | Mark the query as completed
                 self.fetch_queue.task_done()
+
+    async def update_task_worker(self):
+        """
+        异步处理更新队列中的数据库操作
+
+        Asynchronously processes database operations in the update queue
+        """
+        while not self.shutdown_event.is_set():
+            task_id, update_data = await self.update_queue.get()
+
+    async def cleanup_worker(self):
+        """
+        异步清理工作协程，从队列中获取任务并执行文件删除和回调。
+
+        Asynchronous cleanup worker coroutine that takes tasks from the queue and performs file deletion and callback.
+        """
+        while not self.shutdown_event.is_set():
+            cleanup_task = await self.cleanup_queue.get()
+            task = cleanup_task["task"]
+
+            try:
+                # 删除临时文件 | Delete temporary file
+                if settings.file.delete_temp_files_after_processing and task.file_path:
+                    await self.file_utils.delete_file(task.file_path)
+                else:
+                    self.logger.debug(f"Keeping temporary file: {task.file_path}")
+
+            except Exception as e:
+                self.logger.error(f"Error during cleanup for task ID {task.id}: {e}")
+            finally:
+                self.cleanup_queue.task_done()
 
     async def _process_multiple_tasks(self, tasks: List[Task]) -> None:
         """
@@ -192,7 +236,35 @@ class TaskProcessor:
             for task in tasks
         ]
 
+        # 使用 gather 并设置 return_exceptions=True 以便即使某个任务失败也不会影响其他任务
+        # Use gather with return_exceptions=True to allow all tasks to complete even if some fail
         results = await asyncio.gather(*futures, return_exceptions=True)
+
+        for task, result in zip(tasks, results):
+            # 添加清理任务到队列中 | Add cleanup task to queue
+            task_and_task = {
+                "task": task,
+                "result": result,
+            }
+            await self.cleanup_queue.put(task_and_task)
+            if isinstance(result, Exception):
+                self.logger.error(
+                    f"""
+                    Error processing task:
+                    ID          : {task.id}
+                    Engine      : {task.engine_name}
+                    Priority    : {task.priority}
+                    File        : {task.file_name}
+                    Size        : {task.file_size_bytes} bytes
+                    Duration    : {task.file_duration} seconds
+                    Created At  : {task.created_at}
+                    Output URL  : {task.output_url}
+                    Error       : {str(result)}
+                    """,
+                    exc_info=result,
+                )
+            else:
+                self.logger.info(f"Task {task.id} processed successfully.")
 
     def _process_task_sync(self, task: Task) -> dict:
         """
