@@ -249,3 +249,50 @@ class FileUtils:
             # 确保释放文件资源 | Ensure the file resource is released
             if audio is not None:
                 del audio
+
+    async def delete_file(self, file_path: str, retries: int = 3, delay: float = 0.5) -> bool:
+        """
+        异步删除单个文件，带有重试机制
+
+        Asynchronously delete a single file with retry mechanism.
+
+        :param file_path: 要删除的文件路径 | Path of the file to delete.
+        :param retries: 重试次数 | Number of retries if deletion fails
+        :param delay: 每次重试之间的延迟时间（秒） | Delay time between retries in seconds
+        :return: None
+        """
+        file_path = os.path.abspath(file_path)
+        
+        # 确保文件路径在 TEMP_DIR 内部 | Ensure file path is within TEMP_DIR
+        if not file_path.startswith(os.path.realpath(self.TEMP_DIR) + os.sep):
+            self.logger.warning(f"Attempted to delete file outside of TEMP_DIR: {file_path}")
+            return
+        
+        for attempt in range(retries):
+            try:
+                # 检查文件是否为常规文件 | Check if the file is a regular file
+                # asyncio.to_thread使用默认的线程池来执行
+                file_stat = await asyncio.to_thread(os.lstat, file_path)
+                if not stat.S_ISREG(file_stat.st_mode):
+                    self.logger.warning(f"Not a regular file: {file_path}")
+                    return
+
+                # 尝试异步删除文件 | Attempt to delete the file asynchronously
+                await asyncio.to_thread(os.remove, file_path)
+                self.logger.debug(f"File deleted successfully: {file_path}")
+                return
+
+            except FileNotFoundError:
+                self.logger.warning(f"File not found: {file_path}")
+                return  # 无需重试 | No need to retry if file is not found
+            except PermissionError as e:
+                # 如果文件被占用，记录重试信息 | Log retry information if file is in use
+                self.logger.warning(f"Attempt {attempt + 1} to delete file failed due to permission error: {file_path}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(delay)
+                else:
+                    self.logger.error(f"Failed to delete file after {retries} attempts: {file_path}")
+                    raise ValueError("An error occurred while deleting the file due to a permission issue.") from e
+            except (OSError, IOError) as e:
+                self.logger.error(f"Failed to delete file due to an exception: {str(e)}")
+                raise ValueError("An error occurred while deleting the file.") from e

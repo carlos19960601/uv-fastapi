@@ -4,9 +4,8 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
-
-from sympy import EX
+from typing import Any, Iterable, List, Optional
+from dataclasses import asdict, is_dataclass
 
 from app.api.routers.whisper_tasks import task_create
 from app.core.config import settings
@@ -196,6 +195,13 @@ class TaskProcessor:
         """
         while not self.shutdown_event.is_set():
             task_id, update_data = await self.update_queue.get()
+            try:
+                self.db_manager.update_task(task_id, **update_data)
+            except Exception as e:
+                self.logger.error(f"Error updating task {task_id}: {str(e)}")
+            finally:
+                # 标记更新完成 | Mark the query as completed
+                self.update_queue.task_done()
 
     async def cleanup_worker(self):
         """
@@ -230,6 +236,7 @@ class TaskProcessor:
         """
         loop = asyncio.get_event_loop()
 
+        # 为了不阻塞当前的事件循环，_process_task_sync 同步方法放在线程池中执行
         futures = [
             loop.run_in_executor(_executor, self._process_task_sync, task)
             for task in tasks
@@ -334,6 +341,7 @@ class TaskProcessor:
                 )
 
             # 获取模型实例 | Acquire a model instance
+            # 同步方法中不能直接运行协程，只能通过事件循环来调度。
             model = asyncio.run(self.model_pool.get_model())
 
             # 如果模型是线程安全的，可以直接使用 acquire_model 方法 | If the model is thread-safe, you can use the acquire_model method directly
@@ -358,6 +366,8 @@ class TaskProcessor:
                     )
                     segments = [self.segments_to_dict(segment) for segment in segments]
                     language = info.language
+                    # 转换info为字典格式 | Convert info to dictionary format
+                    info = self.segments_to_dict(info)
                 else:
                     raise ValueError(
                         f"Trying to process task with unsupported engine: {self.model_pool.engine}"
@@ -407,7 +417,15 @@ class TaskProcessor:
                 # 将模型实例归还到池中 | Return the model instance to the pool
                 asyncio.run(self.model_pool.return_model(model))
 
+            # 返回字典格式的结果 | Return the result in dictionary format
+            return task_update
+
         except Exception as e:
+            task_update = {
+                "status": TaskStatus.failed,
+                "error_message": str(e)
+            }
+            self.update_queue.put_nowait((task.id, task_update)) 
             self.logger.error(
                 f"""
                 Error processing task: 
@@ -423,3 +441,34 @@ class TaskProcessor:
                 Error       : {str(e)}
                 """
             )
+            
+            # 返回字典格式的结果 | Return the result in dictionary format
+            return task_update
+
+    @staticmethod
+    def segments_to_dict(obj: Any) -> Any:
+        """
+        使用递归方式将Faster Whisper的 NamedTuple 转换为字典。
+
+        Recursively converts a NamedTuple from Faster Whisper to a dictionary.
+
+        :param obj: 要转换的对象 | Object to convert
+        :return: 转换后的对象 | Converted object
+        """
+        # 检查对象是否具有 _asdict 方法（适用于 NamedTuple 实例）
+        if hasattr(obj, "_asdict"):
+            return {key: TaskProcessor.segments_to_dict(value) for key, value in obj._asdict().items()}
+        # 检查对象是否是dataclass
+        elif is_dataclass(obj):
+            return asdict(obj)
+        # 如果是列表或元组，递归转换每个元素，并保持类型
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(TaskProcessor.segments_to_dict(item) for item in obj)
+        # 如果是字典，递归转换每个键值对
+        elif isinstance(obj, dict):
+            return {key: TaskProcessor.segments_to_dict(value) for key, value in obj.items()}
+        # 如果是其他可迭代类型（如生成器），转为列表后递归处理dataclass
+        elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+            return [TaskProcessor.segments_to_dict(item) for item in obj]
+        # 直接返回非复杂类型
+        return obj

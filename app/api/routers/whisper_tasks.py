@@ -6,6 +6,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, 
 
 from app.api.models.api_response_model import ErrorResponseModel, ResponseModel
 from app.api.models.whisper_task_request import WhisperTaskFileOption
+from app.database.models.task_models import TaskStatus, TaskStatusHttpCode, TaskStatusHttpMessage
 from app.utils.logging_utils import configure_logging
 
 router = APIRouter()
@@ -150,7 +151,7 @@ async def task_create(
 
     try:
         decode_options = {
-            "language": task_data.language,
+            "language": task_data.language if task_data.language else None,
             "temperature": (
                 [float(temp) for temp in task_data.temperature.split(",")]
                 if "," in task_data.temperature
@@ -241,7 +242,60 @@ async def task_result(
     """
     try:
         # 通过任务ID查询任务 | Query task by task ID
-        task = await request.app.state.db_manager.get_task_by_id(task_id)
+        task = request.app.state.db_manager.get_task(task_id)
+        if not task:
+            # 任务未找到 - 返回404 | Task not found - return 404
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ErrorResponseModel(
+                    code=status.HTTP_404_NOT_FOUND,
+                    message=TaskStatusHttpMessage.not_found.value,
+                    router=str(request.url),
+                    params=dict(request.query_params),
+                ).model_dump()
+            )
+        
+        # 任务处于排队中 - 返回202 | Task is queued - return 202
+        if task.status == TaskStatus.queued:
+            raise HTTPException(
+                status_code=TaskStatusHttpCode.queued.value,
+                detail=ErrorResponseModel(
+                    code=TaskStatusHttpCode.queued.value,
+                    message=TaskStatusHttpMessage.queued.value,
+                    router=str(request.url),
+                    params=dict(request.query_params),
+                ).model_dump()
+            )
+        # 任务正在处理中 - 返回202 | Task is processing - return 202
+        elif task.status == TaskStatus.processing:
+            raise HTTPException(
+                status_code=TaskStatusHttpCode.processing.value,
+                detail=ErrorResponseModel(
+                    code=TaskStatusHttpCode.processing.value,
+                    message=TaskStatusHttpMessage.processing.value,
+                    router=str(request.url),
+                    params=dict(request.query_params),
+                ).model_dump()
+            )
+        # 任务失败 - 返回500 | Task failed - return 500
+        elif task.status == TaskStatus.failed:
+            raise HTTPException(
+                status_code=TaskStatusHttpCode.failed.value,
+                detail=ErrorResponseModel(
+                    code=TaskStatusHttpCode.failed.value,
+                    message=TaskStatusHttpMessage.failed.value,
+                    router=str(request.url),
+                    params=dict(request.query_params),
+                ).model_dump()
+            )
+
+        # 任务已完成 - 返回200 | Task is completed - return 200
+        return ResponseModel(
+            code=TaskStatusHttpCode.completed.value,
+            router=str(request.url),
+            params=dict(request.query_params),
+            data=task.to_dict()
+        )
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(

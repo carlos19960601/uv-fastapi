@@ -1,10 +1,12 @@
 # 异步模型池 | Async model pool
 import asyncio
 import datetime
+import gc
 import threading
 from asyncio import Queue
 from typing import Optional
 
+from sympy import EX
 import torch
 
 # OpenAI Whisper 模型 | OpenAI Whisper model
@@ -287,6 +289,40 @@ class AsyncModelPool:
                 "Unexpected error occurred while retrieving a model instance."
             )
 
+    async def return_model(self, model) -> None:
+        """
+        将模型实例归还到池中。
+
+        Return a model instance to the pool.
+
+        :param model: 要归还的模型实例 | The model instance to return
+        """
+        try:
+            # 检查池是否已满 | Check if the pool is already full
+            if self.pool.full():
+                self.logger.warning(f"""
+                Model pool is full. Unable to return model instance.
+                Model will be destroyed to prevent resource leak.
+                """)
+                await self._destroy_model(model)
+                return
+
+            # 尝试将模型放入池中 | Try to return the model to the pool
+            await self.pool.put(model)
+            self.logger.info(f"""
+            Model instance successfully returned to the pool.
+            Current pool size (after return): {self.pool.qsize()}
+            """)
+        except (RuntimeError, AttributeError) as e:
+            # 捕获模型实例无效的情况 | Catch cases where the model instance is invalid
+            self.logger.error(f"Failed to return model to pool due to invalid model instance: {str(e)}", exc_info=True)
+            await self._destroy_model(model)
+                 
+        except Exception as e:
+            # 捕获任何其他未预料到的异常 | Capture any other unexpected exceptions
+            self.logger.error(f"An unexpected error occurred while returning model to pool: {str(e)}", exc_info=True)
+            await self._destroy_model(model)
+
     def allocate_device(
         self, instance_index: int, device_type: Optional[str], model_type: str
     ) -> dict:
@@ -445,3 +481,42 @@ class AsyncModelPool:
             self.logger.error(
                 f"Failed to create and add model instance to the pool: {e}"
             )
+
+    async def _destroy_model(self, model) -> None:
+        """
+        销毁模型实例并更新池大小。
+
+        Destroy a model instance and update the pool size.
+
+        :param model: 要销毁的模型实例 | The model instance to destroy
+        """
+        try:
+            # 删除模型实例的引用 | Explicitly delete the model instance reference
+            del model
+            # 获取设备分配信息 | Get device allocation info
+            device_allocation = self.allocate_device(self.current_size - 1, self.fast_whisper_device, self.engine)
+            # 如果使用 GPU 则清理 CUDA 缓存 | Clear CUDA cache if using GPU
+            if device_allocation["device"].startswith("cuda"):
+                # 如果是单 GPU 系统，则清理整个 CUDA 缓存 | If it's a single GPU system, clear the entire CUDA cache
+                if self.num_gpus == 1:
+                    torch.cuda.empty_cache()
+                    self.logger.info(f"CUDA cache cleared for device {device_allocation['device']} after model destruction.")
+                else:
+                    # 多 GPU 系统，则不进行清理，防止影响其他模型实例 | Multi-GPU system, do not clear to avoid affecting other model instances
+                    self.logger.info(f"Skipping CUDA cache cleanup for multi-GPU system after model destruction.")
+             # 执行垃圾回收 | Perform garbage collection on any device
+            gc.collect()
+            self.logger.info("Garbage collection performed after model destruction.")
+            
+            # 更新池大小，确保减少当前池大小 | Update pool size to reflect the reduced pool size
+            async with self.size_lock:
+                self.current_size = max(0, self.current_size - 1)
+                self.logger.info(f"""
+                Model instance destroyed successfully.
+                Updated pool size: {self.current_size}
+                Minimum pool size: {self.min_size}
+                Maximum pool size: {self.max_size}
+                """)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to destroy model instance: {str(e)}", exc_info=True)

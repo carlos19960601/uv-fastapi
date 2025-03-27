@@ -120,3 +120,20 @@ class DatabaseManager:
                 logger.error(f"Error updating task: {e}")
                 session.rollback()
                 return None
+
+    def get_task(self, task_id: int) -> Optional[Task]:
+        """
+        根据ID异步获取任务
+
+        Asynchronously get a task by ID.
+
+        :param task_id: 任务ID | Task ID
+        :return: 任务信息 | Task details
+        """
+        with self.get_session() as session:
+            try:
+                task = session.get(Task, task_id)
+                return task
+            except Exception as e:
+                logger.error(f"Error fetching task by ID {task_id}: {e}")
+                return None

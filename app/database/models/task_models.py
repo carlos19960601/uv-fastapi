@@ -1,22 +1,51 @@
 import enum
 from datetime import datetime
+from http import HTTPStatus
 from typing import Optional
 
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
-
+# 定义任务状态的枚举类型 | Define an enum for task status
 class TaskStatus(enum.Enum):
     queued = "queued"
     processing = "processing"
     completed = "completed"
     failed = "failed"
 
-
+# 定义任务优先级的枚举类型 | Define an enum for task priority
 class TaskPriority(enum.Enum):
     high = "high"
     normal = "normal"
     low = "low"
+    
+# TaskStatusHttpCode 枚举类，用于映射 TaskStatus 到 HTTP 状态码
+# TaskStatusHttpCode enum class, used to map TaskStatus to HTTP status code
+class TaskStatusHttpCode(enum.Enum):
+    # 202 - Accepted (for ongoing processing)
+    queued = HTTPStatus.ACCEPTED
+    # 202 - Accepted (for ongoing processing)
+    processing = HTTPStatus.ACCEPTED
+    # 200 - OK (for successful completion)
+    completed = HTTPStatus.OK
+    # 500 - Internal Server Error (for task failure)
+    failed = HTTPStatus.INTERNAL_SERVER_ERROR
+
+# TaskStatusHttpMessage 枚举类，用于映射 TaskStatus 到 HTTP 状态消息
+# TaskStatusHttpMessage enum class, used to map TaskStatus to HTTP status message
+class TaskStatusHttpMessage(enum.Enum):
+    # 202 - Accepted (for ongoing processing)
+    queued = "Task is queued and not started yet"
+    # 202 - Accepted (for ongoing processing)
+    processing = "Task is currently being processed"
+    # 200 - OK (for successful completion)
+    completed = "Task has been completed"
+    # 404 - Not Found (for task not found or invalid task ID)
+    not_found = "Task not found or has been deleted or invalid task ID"
+    # 500 - Internal Server Error (for task failure)
+    failed = "Task failed during processing"
+    # 503 - Service Unavailable (for database error)
+    service_unavailable = "Database error occurred. Please try again later."
 
 
 class Task(SQLModel, table=True):
