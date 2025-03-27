@@ -7,13 +7,13 @@ from typing import Optional
 
 import torch
 
-from app.utils.logging_utils import configure_logging
-
 # OpenAI Whisper 模型 | OpenAI Whisper model
 import whisper
 
 # Faster-Whisper 模型 | Faster-Whisper model
 from faster_whisper import WhisperModel
+
+from app.utils.logging_utils import configure_logging
 
 
 class AsyncModelPool:
@@ -248,7 +248,22 @@ class AsyncModelPool:
                 # 尝试从池中获取现有模型实例 | Attempt to retrieve an existing model instance
                 try:
                     model = await asyncio.wait_for(self.pool.get(), timeout=timeout)
+                    self.logger.info(
+                        "Model instance successfully retrieved from the pool (existing instance)."
+                    )
+                    return model
                 except asyncio.TimeoutError:
+                    # 如果池为空且等待超时，则检查是否允许创建新实例 | Check if new instances can be created on timeout
+                    async with self.size_lock:
+                        if self.current_size < self.max_size:
+                            instance_index = self.current_size
+                            await self._create_and_put_model(instance_index)
+                            self.logger.info(
+                                f"Pool exhausted. Created new model instance with index {instance_index}."
+                            )
+                            # 获取刚创建的模型 | Retrieve the newly created model
+                            model = await self.pool.get()
+                            return model
                     self.logger.error(
                         "All model instances are in use, and the pool is exhausted."
                     )
@@ -263,6 +278,8 @@ class AsyncModelPool:
             else:
                 # 默认尝试从池中获取模型实例 | Default: attempt to retrieve from pool
                 model = await asyncio.wait_for(self.pool.get(), timeout=timeout)
+                self.logger.info("Model instance successfully retrieved from the pool.")
+                return model
 
         except Exception as e:
             self.logger.error(f"Failed to retrieve a model instance from the pool: {e}")
@@ -400,6 +417,29 @@ class AsyncModelPool:
                 raise ValueError(
                     "Invalid engine specified. Choose 'openai_whisper' or 'faster_whisper'."
                 )
+
+            # 将模型放入池中 | Put model into the pool
+            await self.pool.put(model)
+
+            # 更新池大小 | Update pool size
+            async with self.size_lock:
+                self.current_size += 1
+
+            # 计算加载时间（以秒为单位） | Calculate load time in seconds
+            time_taken = (end_time - start_time).total_seconds()
+
+            self.logger.info(
+                f"""
+                Successfully created and added a new model instance to the pool.
+                Engine           : {self.engine}
+                Device           : {device_allocation['device']}
+                Compute type     : {device_allocation['compute_type']}
+                Device index     : {device_allocation.get('device_index', 'N/A')}
+                Instance index   : {instance_index}
+                Model load time  : {time_taken:.2f} seconds
+                Current pool size: {self.current_size}
+                """
+            )
 
         except Exception as e:
             self.logger.error(

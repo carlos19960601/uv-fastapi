@@ -9,7 +9,9 @@ dependencies = [
     "aiosqlite>=0.21.0",
     "fastapi[standard]>=0.115.8",
     "filetype>=1.2.0",
+    "numba>=0.60.0",
     "numpy>=2.0.2",
+    "openai-whisper>=20240930",
     "passlib[bcrypt]>=1.7.4",
     "psycopg[binary]>=3.2.4",
     "pydantic-settings>=2.7.1",
@@ -17,3 +19,6 @@ dependencies = [
     "sqlmodel>=0.0.22",
     "torch>=2.2.2",
 ]
+
+[tool.uv]
+constraint-dependencies = ["llvm>0.43.0"]

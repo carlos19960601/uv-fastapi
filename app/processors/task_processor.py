@@ -336,6 +336,9 @@ class TaskProcessor:
             # 获取模型实例 | Acquire a model instance
             model = asyncio.run(self.model_pool.get_model())
 
+            # 如果模型是线程安全的，可以直接使用 acquire_model 方法 | If the model is thread-safe, you can use the acquire_model method directly
+            # model = asyncio.run(self.model_pool.acquire_model())
+
             try:
                 # 记录任务开始时间 | Record task start time
                 task_start_time: datetime.datetime = datetime.datetime.now()
