@@ -90,6 +90,9 @@ class DatabaseSettings(BaseModel):
         f"mysql://{mysql_username}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_db_name}"
     )
 
+    # 是否自动创建数据库表 | Whether to automatically create database tables
+    auto_create_tables: bool = False
+
 
 # 日志设置 | Log settings
 class LogSettings(BaseModel):

@@ -4,14 +4,15 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Iterable, List, Optional
 from dataclasses import asdict, is_dataclass
+from typing import Any, Iterable, List, Optional
 
 from app.api.routers.whisper_tasks import task_create
 from app.core.config import settings
 from app.database.database_manager import DatabaseManager
 from app.database.models.task_models import Task, TaskStatus
 from app.model_pool.async_model_pool import AsyncModelPool
+from app.services.callback_service import CallbackService
 from app.utils.file_utils import FileUtils
 from app.utils.logging_utils import configure_logging
 
@@ -48,6 +49,7 @@ class TaskProcessor:
         self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self.thread: threading.Thread = threading.Thread(target=self.run_loop)
         self.shutdown_event: threading.Event = threading.Event()
+        self.callback_service: CallbackService = CallbackService()
         self.max_concurrent_tasks: int = max_concurrent_tasks
         self.task_status_check_interval: int = task_status_check_interval
 
@@ -105,10 +107,15 @@ class TaskProcessor:
         self.loop.create_task(self.cleanup_worker())
 
         # 使用 create_task 启动 callback_worker 作为持续运行的后台任务 | Start callback_worker as a continuous background task using create_task
-        # self.loop.create_task(self.callback_worker())
+        self.loop.create_task(self.callback_worker())
 
         # 使用 run_forever 让事件循环一直运行，直到 stop 被调用 | Use run_forever to keep the event loop running until stop is called
         self.loop.run_forever()
+
+        # 在退出前清理事件循环中的挂起任务 | Clean up pending tasks in the event loop before exiting
+        pending = asyncio.all_tasks(self.loop)
+        if pending:
+            self.loop.run_until_complete(asyncio.gather(*pending))
 
         self.loop.close()
         self.logger.info("TaskProcessor Event loop closed.")
@@ -225,6 +232,28 @@ class TaskProcessor:
             finally:
                 self.cleanup_queue.task_done()
 
+    async def callback_worker(self):
+        """
+        异步回调工作协程，从队列中获取回调任务并执行回调通知。
+
+        Asynchronous callback worker coroutine that takes callback tasks from the queue and performs callback notifications.
+        """
+        while not self.shutdown_event.is_set():
+            callback_task = await self.callback_queue.get()
+            task = callback_task["task"]
+
+            try:
+                # 发送回调通知 | Send callback notification
+                if task.callback_url:
+                    await self.callback_service.task_callback_notification(
+                        task=task,
+                        db_manager=self.db_manager,
+                    )
+            except Exception as e:
+                self.logger.error(f"Error during callback for task ID {task.id}: {e}")
+            finally:
+                self.callback_queue.task_done()
+
     async def _process_multiple_tasks(self, tasks: List[Task]) -> None:
         """
         并行处理给定的多个任务，将每个任务提交到线程池。
@@ -253,6 +282,7 @@ class TaskProcessor:
                 "result": result,
             }
             await self.cleanup_queue.put(task_and_task)
+            await self.callback_queue.put(task_and_task)
             if isinstance(result, Exception):
                 self.logger.error(
                     f"""
@@ -421,11 +451,8 @@ class TaskProcessor:
             return task_update
 
         except Exception as e:
-            task_update = {
-                "status": TaskStatus.failed,
-                "error_message": str(e)
-            }
-            self.update_queue.put_nowait((task.id, task_update)) 
+            task_update = {"status": TaskStatus.failed, "error_message": str(e)}
+            self.update_queue.put_nowait((task.id, task_update))
             self.logger.error(
                 f"""
                 Error processing task: 
@@ -441,7 +468,7 @@ class TaskProcessor:
                 Error       : {str(e)}
                 """
             )
-            
+
             # 返回字典格式的结果 | Return the result in dictionary format
             return task_update
 
@@ -457,7 +484,10 @@ class TaskProcessor:
         """
         # 检查对象是否具有 _asdict 方法（适用于 NamedTuple 实例）
         if hasattr(obj, "_asdict"):
-            return {key: TaskProcessor.segments_to_dict(value) for key, value in obj._asdict().items()}
+            return {
+                key: TaskProcessor.segments_to_dict(value)
+                for key, value in obj._asdict().items()
+            }
         # 检查对象是否是dataclass
         elif is_dataclass(obj):
             return asdict(obj)
@@ -466,9 +496,12 @@ class TaskProcessor:
             return type(obj)(TaskProcessor.segments_to_dict(item) for item in obj)
         # 如果是字典，递归转换每个键值对
         elif isinstance(obj, dict):
-            return {key: TaskProcessor.segments_to_dict(value) for key, value in obj.items()}
+            return {
+                key: TaskProcessor.segments_to_dict(value) for key, value in obj.items()
+            }
         # 如果是其他可迭代类型（如生成器），转为列表后递归处理dataclass
         elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
             return [TaskProcessor.segments_to_dict(item) for item in obj]
         # 直接返回非复杂类型
+        return obj
         return obj

@@ -42,8 +42,11 @@ async def lifespan(app: FastAPI):
             "Can not recognize the database type, please check the database type in the settings."
         )
 
+    auto_create_tables = settings.database.auto_create_tables
     db_manager = DatabaseManager(
-        database_type=settings.database.db_type, database_url=database_url
+        database_type=settings.database.db_type,
+        database_url=database_url,
+        auto_create_tables=auto_create_tables,
     )
     db_manager.initialize()
 
@@ -82,6 +85,7 @@ async def lifespan(app: FastAPI):
         max_concurrent_tasks=settings.whisper_service.MAX_CONCURRENT_TASKS,
         task_status_check_interval=settings.whisper_service.TASK_STATUS_CHECK_INTERVAL,
     )
+
     # 启动任务处理器 | Start the task processor
     whisper_service.start_task_processor()
 
@@ -98,6 +102,7 @@ async def lifespan(app: FastAPI):
     whisper_service.stop_task_processor()
 
 
+# 创建 FastAPI 应用实例
 app = FastAPI(
     title=settings.fastapi.title,
     description=settings.fastapi.description,

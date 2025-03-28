@@ -1,6 +1,7 @@
 import asyncio
+import datetime
 from contextlib import contextmanager
-from typing import Generator, List, Optional
+from typing import Generator, List, Optional, Union
 
 from sqlalchemy import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -17,6 +18,7 @@ class DatabaseManager:
         self,
         database_type: str,
         database_url: str,
+        auto_create_tables: bool,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         reconnect_interval: int = 5,
     ) -> None:
@@ -32,6 +34,7 @@ class DatabaseManager:
         """
         self.database_type: str = database_type
         self.database_url: str = database_url
+        self.auto_create_tables: bool = auto_create_tables
         self._is_connected: bool = False
         self._engine: Optional[Engine] = None
 
@@ -52,7 +55,8 @@ class DatabaseManager:
                 elif self.database_type == "sqlite":
                     self._engine = create_engine(self.database_url, echo=True)
 
-                SQLModel.metadata.create_all(self._engine)
+                if self.auto_create_tables:
+                    self.create_db_and_tables()
 
                 self._is_connected = True
                 logger.info(
@@ -60,6 +64,9 @@ class DatabaseManager:
                 )
             except Exception:
                 raise
+
+    def create_db_and_tables(self):
+        SQLModel.metadata.create_all(self._engine)
 
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:
@@ -120,6 +127,80 @@ class DatabaseManager:
                 logger.error(f"Error updating task: {e}")
                 session.rollback()
                 return None
+
+    def update_task_callback_status(
+        self,
+        task_id: int,
+        callback_status_code: int,
+        callback_message: Optional[str],
+        callback_time: Union[str, datetime.datetime],
+    ) -> None:
+        """
+        更新任务的回调状态码、回调消息和回调时间
+
+        Update the task's callback status code, callback message, and callback time
+
+        :param task_id: 任务ID | Task ID
+        :param callback_status_code: 回调状态码 | Callback status code
+        :param callback_message: 回调消息 | Callback message
+        :param callback_time: 回调时间 | Callback time
+        :return: None
+        """
+        with self.get_session() as session:
+            try:
+                task = session.get(Task, task_id)
+                if task:
+                    task.callback_status_code = callback_status_code
+                    task.callback_message = (
+                        callback_message[:512] if callback_message else None
+                    )
+                    task.callback_time = callback_time
+                    session.commit()
+            except Exception as e:
+                logger.error(f"Error updating task callback status: {e}")
+                session.rollback()
+
+    def delete_task(self, task_id: int) -> bool:
+        """
+        根据ID异步删除任务
+
+        Asynchronously delete a task by ID.
+
+        :param task_id: 任务ID | Task ID
+        :return: 是否删除成功 | Whether deletion was successful
+        """
+        with self.get_session() as session:
+            try:
+                task = session.get(Task, task_id)
+                if task:
+                    session.delete(task)
+                    session.commit()
+                    return True
+                return False
+            except Exception as e:
+                logger.error(f"Error deleting task ID {task_id}: {e}")
+                session.rollback()
+                return False
+
+    def bulk_delete_tasks(self, task_ids: List[int]) -> None:
+        """
+        批量删除多个任务
+
+        Bulk delete multiple tasks.
+
+        :param task_ids: 要删除的任务ID列表 | List of task IDs to delete
+        """
+        with self.get_session() as session:
+            try:
+                for task_id in task_ids:
+                    task = session.get(Task, task_id)
+                    if task:
+                        session.delete(task)
+                session.commit()
+                logger.info(f"Bulk delete completed for {len(task_ids)} tasks.")
+            except Exception as e:
+                logger.error(f"Error bulk deleting tasks: {e}")
+                session.rollback()
 
     def get_task(self, task_id: int) -> Optional[Task]:
         """

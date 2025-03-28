@@ -6,7 +6,11 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, 
 
 from app.api.models.api_response_model import ErrorResponseModel, ResponseModel
 from app.api.models.whisper_task_request import WhisperTaskFileOption
-from app.database.models.task_models import TaskStatus, TaskStatusHttpCode, TaskStatusHttpMessage
+from app.database.models.task_models import (
+    TaskStatus,
+    TaskStatusHttpCode,
+    TaskStatusHttpMessage,
+)
 from app.utils.logging_utils import configure_logging
 
 router = APIRouter()
@@ -252,9 +256,8 @@ async def task_result(
                     message=TaskStatusHttpMessage.not_found.value,
                     router=str(request.url),
                     params=dict(request.query_params),
-                ).model_dump()
+                ).model_dump(),
             )
-        
         # 任务处于排队中 - 返回202 | Task is queued - return 202
         if task.status == TaskStatus.queued:
             raise HTTPException(
@@ -264,7 +267,7 @@ async def task_result(
                     message=TaskStatusHttpMessage.queued.value,
                     router=str(request.url),
                     params=dict(request.query_params),
-                ).model_dump()
+                ).model_dump(),
             )
         # 任务正在处理中 - 返回202 | Task is processing - return 202
         elif task.status == TaskStatus.processing:
@@ -275,7 +278,7 @@ async def task_result(
                     message=TaskStatusHttpMessage.processing.value,
                     router=str(request.url),
                     params=dict(request.query_params),
-                ).model_dump()
+                ).model_dump(),
             )
         # 任务失败 - 返回500 | Task failed - return 500
         elif task.status == TaskStatus.failed:
@@ -286,7 +289,7 @@ async def task_result(
                     message=TaskStatusHttpMessage.failed.value,
                     router=str(request.url),
                     params=dict(request.query_params),
-                ).model_dump()
+                ).model_dump(),
             )
 
         # 任务已完成 - 返回200 | Task is completed - return 200
@@ -294,7 +297,7 @@ async def task_result(
             code=TaskStatusHttpCode.completed.value,
             router=str(request.url),
             params=dict(request.query_params),
-            data=task.to_dict()
+            data=task.to_dict(),
         )
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
